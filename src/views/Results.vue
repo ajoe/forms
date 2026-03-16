@@ -101,7 +101,6 @@
 							{{ t('forms', 'Save copy to Files') }}
 						</NcActionButton>
 						<NcActionButton
-							v-if="!noSubmissions"
 							:close-after-click="false"
 							is-menu
 							@click="isDownloadActionOpened = true">
@@ -132,6 +131,16 @@
 						<NcActionSeparator />
 						<NcActionButton
 							close-after-click
+							@click="onDownloadExportJson">
+							<template #icon>
+								<IconDownload :size="20" />
+							</template>
+							{{ t('forms', 'Export (JSON)') }}
+						</NcActionButton>
+						<NcActionSeparator v-if="!noSubmissions" />
+						<NcActionButton
+							v-if="!noSubmissions"
+							close-after-click
 							@click="onDownloadFile('csv')">
 							<template #icon>
 								<IconFileDelimited :size="20" />
@@ -139,6 +148,7 @@
 							CSV
 						</NcActionButton>
 						<NcActionButton
+							v-if="!noSubmissions"
 							close-after-click
 							@click="onDownloadFile('ods')">
 							<template #icon>
@@ -147,6 +157,7 @@
 							ODS
 						</NcActionButton>
 						<NcActionButton
+							v-if="!noSubmissions"
 							close-after-click
 							@click="onDownloadFile('xlsx')">
 							<template #icon>
@@ -607,6 +618,66 @@ export default {
 				+ '&fileFormat='
 				+ fileFormat
 			window.open(exportUrl, '_self')
+		},
+
+		sanitizeFileName(fileName) {
+			return String(fileName)
+				.replace(/[\\/:*?"<>|]+/g, '_')
+				.replace(/\s+/g, ' ')
+				.trim()
+		},
+
+		buildJsonFileName(label) {
+			const baseTitle = this.sanitizeFileName(this.formTitle || this.form?.title || 'form')
+			const safeLabel = this.sanitizeFileName(label)
+			return `${baseTitle} (${safeLabel}).json`
+		},
+
+		downloadJsonFile(fileName, payload) {
+			const json = JSON.stringify(payload, null, 2)
+			const blob = new Blob([json], { type: 'application/json' })
+			const url = window.URL.createObjectURL(blob)
+			const link = document.createElement('a')
+			link.href = url
+			link.download = fileName
+			document.body.appendChild(link)
+			link.click()
+			link.remove()
+			window.URL.revokeObjectURL(url)
+		},
+
+		async onDownloadExportJson() {
+			try {
+				const [formResponse, submissionsResponse] = await Promise.all([
+					axios.get(
+						generateOcsUrl('apps/forms/api/v3/forms/{id}', {
+							id: this.form.id,
+						}),
+					),
+					axios.get(
+						generateOcsUrl('apps/forms/api/v3/forms/{id}/submissions', {
+							id: this.form.id,
+						}),
+					),
+				])
+
+				const formData = OcsResponse2Data(formResponse)
+				const submissionsData = OcsResponse2Data(submissionsResponse)
+
+				this.downloadJsonFile(
+					this.buildJsonFileName(t('forms', 'Export')),
+					{
+						form: formData,
+						results: submissionsData,
+						exportedAt: new Date().toISOString(),
+					},
+				)
+			} catch (error) {
+				logger.error('Error while exporting as JSON', { error })
+				showError(
+					t('forms', 'There was an error while exporting as JSON'),
+				)
+			}
 		},
 
 		async onLinkFile() {
