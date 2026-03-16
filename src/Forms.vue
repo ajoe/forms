@@ -494,6 +494,11 @@ export default {
 				return
 			}
 
+			if (file.size > 10 * 1024 * 1024) {
+				showError(t('forms', 'Import file is too large'))
+				return
+			}
+
 			let exportData = null
 			try {
 				const text = await file.text()

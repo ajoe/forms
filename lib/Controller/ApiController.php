@@ -48,6 +48,7 @@ use OCP\BackgroundJob\IJobList;
 use OCP\Files\IMimeTypeDetector;
 use OCP\Files\IRootFolder;
 use OCP\IL10N;
+use OCP\IDBConnection;
 use OCP\IRequest;
 use OCP\IUser;
 use OCP\IUserManager;
@@ -90,6 +91,7 @@ class ApiController extends OCSController {
 		private UploadedFileMapper $uploadedFileMapper,
 		private IMimeTypeDetector $mimeTypeDetector,
 		private IJobList $jobList,
+		private IDBConnection $db,
 	) {
 		parent::__construct($appName, $request);
 		$this->currentUser = $userSession->getUser();
@@ -271,113 +273,121 @@ class ApiController extends OCSController {
 
 		$access = $this->sanitizeAccessFromImport($formData['access'] ?? []);
 
-		$form = new Form();
-		$form->setOwnerId($this->currentUser->getUID());
-		$form->setHash($this->formsService->generateFormHash());
-		$form->setTitle((string)($formData['title'] ?? ''));
-		$form->setDescription((string)($formData['description'] ?? ''));
-		$form->setAccess($access);
-		$form->setExpires((int)($formData['expires'] ?? 0));
-		$form->setIsAnonymous((bool)($formData['isAnonymous'] ?? false));
-		$form->setSubmitMultiple((bool)($formData['submitMultiple'] ?? false));
-		$form->setAllowEditSubmissions((bool)($formData['allowEditSubmissions'] ?? false));
-		$form->setShowExpiration((bool)($formData['showExpiration'] ?? false));
-		$form->setSubmissionMessage($formData['submissionMessage'] ?? null);
-		if (array_key_exists('maxSubmissions', $formData)) {
-			$form->setMaxSubmissions($formData['maxSubmissions'] === null ? null : (int)$formData['maxSubmissions']);
-		}
-
-		$this->formMapper->insert($form);
-
-		$questionIdMap = [];
-		foreach ($questionsData as $questionData) {
-			if (!is_array($questionData)) {
-				continue;
+		$this->db->beginTransaction();
+		try {
+			$form = new Form();
+			$form->setOwnerId($this->currentUser->getUID());
+			$form->setHash($this->formsService->generateFormHash());
+			$form->setTitle((string)($formData['title'] ?? ''));
+			$form->setDescription((string)($formData['description'] ?? ''));
+			$form->setAccess($access);
+			$form->setExpires((int)($formData['expires'] ?? 0));
+			$form->setIsAnonymous((bool)($formData['isAnonymous'] ?? false));
+			$form->setSubmitMultiple((bool)($formData['submitMultiple'] ?? false));
+			$form->setAllowEditSubmissions((bool)($formData['allowEditSubmissions'] ?? false));
+			$form->setShowExpiration((bool)($formData['showExpiration'] ?? false));
+			$form->setSubmissionMessage($formData['submissionMessage'] ?? null);
+			if (array_key_exists('maxSubmissions', $formData)) {
+				$form->setMaxSubmissions($formData['maxSubmissions'] === null ? null : (int)$formData['maxSubmissions']);
 			}
 
-			$question = new Question();
-			$question->setFormId($form->getId());
-			$question->setOrder((int)($questionData['order'] ?? (count($questionIdMap) + 1)));
-			$question->setType((string)($questionData['type'] ?? 'short'));
-			$question->setIsRequired((bool)($questionData['isRequired'] ?? false));
-			$question->setText((string)($questionData['text'] ?? ''));
-			$question->setName((string)($questionData['name'] ?? ''));
-			$question->setDescription((string)($questionData['description'] ?? ''));
+			$this->formMapper->insert($form);
 
-			$extraSettings = $questionData['extraSettings'] ?? [];
-			if ($extraSettings instanceof \stdClass) {
-				$extraSettings = (array)$extraSettings;
-			}
-			if (!is_array($extraSettings)) {
-				$extraSettings = [];
-			}
-			$question->setExtraSettings($extraSettings);
-
-			$this->questionMapper->insert($question);
-
-			if (isset($questionData['id'])) {
-				$questionIdMap[(int)$questionData['id']] = $question->getId();
-			}
-
-			$optionsData = $questionData['options'] ?? [];
-			if (!is_array($optionsData)) {
-				$optionsData = [];
-			}
-			foreach ($optionsData as $optionIndex => $optionData) {
-				if (!is_array($optionData)) {
-					continue;
-				}
-				$option = new Option();
-				$option->setQuestionId($question->getId());
-				$option->setText((string)($optionData['text'] ?? ''));
-				$option->setOrder((int)($optionData['order'] ?? ($optionIndex + 1)));
-				if (isset($optionData['optionType'])) {
-					$option->setOptionType((string)$optionData['optionType']);
-				}
-
-				$this->optionMapper->insert($option);
-			}
-		}
-
-		foreach ($submissionsData as $submissionData) {
-			if (!is_array($submissionData)) {
-				continue;
-			}
-
-			$submission = new Submission();
-			$submission->setFormId($form->getId());
-			$submission->setUserId((string)($submissionData['userId'] ?? $this->currentUser->getUID()));
-			$submission->setTimestamp((int)($submissionData['timestamp'] ?? time()));
-
-			$this->submissionMapper->insert($submission);
-
-			$answersData = $submissionData['answers'] ?? [];
-			if (!is_array($answersData)) {
-				$answersData = [];
-			}
-			foreach ($answersData as $answerData) {
-				if (!is_array($answerData)) {
+			$questionIdMap = [];
+			foreach ($questionsData as $questionData) {
+				if (!is_array($questionData)) {
 					continue;
 				}
 
-				$oldQuestionId = $answerData['questionId'] ?? null;
-				if ($oldQuestionId === null || !isset($questionIdMap[(int)$oldQuestionId])) {
+				$type = (string)($questionData['type'] ?? 'short');
+				if (!in_array($type, Constants::ANSWER_TYPES, true)) {
 					continue;
 				}
 
-				$answer = new Answer();
-				$answer->setSubmissionId($submission->getId());
-				$answer->setQuestionId($questionIdMap[(int)$oldQuestionId]);
-				if (array_key_exists('fileId', $answerData)) {
-					$answer->setFileId($answerData['fileId'] === null ? null : (int)$answerData['fileId']);
+				$question = new Question();
+				$question->setFormId($form->getId());
+				$question->setOrder((int)($questionData['order'] ?? (count($questionIdMap) + 1)));
+				$question->setType($type);
+				$question->setIsRequired((bool)($questionData['isRequired'] ?? false));
+				$question->setText((string)($questionData['text'] ?? ''));
+				$question->setName((string)($questionData['name'] ?? ''));
+				$question->setDescription((string)($questionData['description'] ?? ''));
+
+				$extraSettings = $questionData['extraSettings'] ?? [];
+				if ($extraSettings instanceof \stdClass) {
+					$extraSettings = (array)$extraSettings;
 				}
-				$answer->setText((string)($answerData['text'] ?? ''));
+				if (!is_array($extraSettings)) {
+					$extraSettings = [];
+				}
+				$question->setExtraSettings($extraSettings);
 
-				$this->answerMapper->insert($answer);
+				$this->questionMapper->insert($question);
+
+				if (isset($questionData['id'])) {
+					$questionIdMap[(int)$questionData['id']] = $question->getId();
+				}
+
+				$optionsData = $questionData['options'] ?? [];
+				if (!is_array($optionsData)) {
+					$optionsData = [];
+				}
+				foreach ($optionsData as $optionIndex => $optionData) {
+					if (!is_array($optionData)) {
+						continue;
+					}
+					$option = new Option();
+					$option->setQuestionId($question->getId());
+					$option->setText((string)($optionData['text'] ?? ''));
+					$option->setOrder((int)($optionData['order'] ?? ($optionIndex + 1)));
+					if (isset($optionData['optionType'])) {
+						$option->setOptionType((string)$optionData['optionType']);
+					}
+
+					$this->optionMapper->insert($option);
+				}
 			}
-		}
 
-		$this->formMapper->update($form);
+			foreach ($submissionsData as $submissionData) {
+				if (!is_array($submissionData)) {
+					continue;
+				}
+
+				$submission = new Submission();
+				$submission->setFormId($form->getId());
+				$submission->setUserId($this->currentUser->getUID());
+				$submission->setTimestamp((int)($submissionData['timestamp'] ?? time()));
+
+				$this->submissionMapper->insert($submission);
+
+				$answersData = $submissionData['answers'] ?? [];
+				if (!is_array($answersData)) {
+					$answersData = [];
+				}
+				foreach ($answersData as $answerData) {
+					if (!is_array($answerData)) {
+						continue;
+					}
+
+					$oldQuestionId = $answerData['questionId'] ?? null;
+					if ($oldQuestionId === null || !isset($questionIdMap[(int)$oldQuestionId])) {
+						continue;
+					}
+
+					$answer = new Answer();
+					$answer->setSubmissionId($submission->getId());
+					$answer->setQuestionId($questionIdMap[(int)$oldQuestionId]);
+					$answer->setText((string)($answerData['text'] ?? ''));
+
+					$this->answerMapper->insert($answer);
+				}
+			}
+
+			$this->db->commit();
+		} catch (\Throwable $e) {
+			$this->db->rollBack();
+			throw $e;
+		}
 
 		return new DataResponse($this->formsService->getForm($form), Http::STATUS_CREATED);
 	}
@@ -1968,7 +1978,8 @@ class ApiController extends OCSController {
 			if (($showAll && !$this->configService->getAllowShowToAll())
 				|| ($permitAll && !$this->configService->getAllowPermitAll())) {
 				$this->logger->info('Not allowed to update showToAllUsers or permitAllUsers');
-			throw new OCSForbiddenException();
+				throw new OCSForbiddenException();
+			}
 		}
 	}
 
@@ -2006,7 +2017,6 @@ class ApiController extends OCSController {
 			'permitAllUsers' => $permitAll,
 			'showToAllUsers' => $showAll,
 		];
-	}
 	}
 
 	/**
