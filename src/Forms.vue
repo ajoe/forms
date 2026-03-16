@@ -16,6 +16,20 @@
 					<IconPlus :size="20" decorative />
 				</template>
 			</NcAppNavigationNew>
+			<NcAppNavigationNew
+				v-if="canCreateForms"
+				:text="t('forms', 'Import form')"
+				@click="onImportForm">
+				<template #icon>
+					<IconUpload :size="20" decorative />
+				</template>
+			</NcAppNavigationNew>
+			<input
+				ref="importFileInput"
+				class="forms-import-input"
+				type="file"
+				accept="application/json"
+				@change="onImportFileSelected">
 
 			<!-- Form-Owner-->
 			<template v-if="ownedForms.length > 0">
@@ -139,7 +153,7 @@
 
 <script>
 import axios from '@nextcloud/axios'
-import { showError } from '@nextcloud/dialogs'
+import { showError, showSuccess } from '@nextcloud/dialogs'
 import { emit, subscribe, unsubscribe } from '@nextcloud/event-bus'
 import { loadState } from '@nextcloud/initial-state'
 import moment from '@nextcloud/moment'
@@ -155,6 +169,7 @@ import NcEmptyContent from '@nextcloud/vue/components/NcEmptyContent'
 import NcLoadingIcon from '@nextcloud/vue/components/NcLoadingIcon'
 import IconArchive from 'vue-material-design-icons/ArchiveOutline.vue'
 import IconPlus from 'vue-material-design-icons/Plus.vue'
+import IconUpload from 'vue-material-design-icons/TrayArrowUp.vue'
 import AppNavigationForm from './components/AppNavigationForm.vue'
 import ArchivedFormsModal from './components/ArchivedFormsModal.vue'
 import FormsIcon from './components/Icons/FormsIcon.vue'
@@ -174,6 +189,7 @@ export default {
 		FormsIcon,
 		IconArchive,
 		IconPlus,
+		IconUpload,
 		NcAppContent,
 		NcAppNavigation,
 		NcAppNavigationCaption,
@@ -463,6 +479,55 @@ export default {
 			}
 		},
 
+		onImportForm() {
+			const input = this.$refs.importFileInput
+			if (!input) {
+				return
+			}
+			input.value = ''
+			input.click()
+		},
+
+		async onImportFileSelected(event) {
+			const file = event.target?.files?.[0]
+			if (!file) {
+				return
+			}
+
+			let exportData = null
+			try {
+				const text = await file.text()
+				exportData = JSON.parse(text)
+			} catch (error) {
+				logger.error('Unable to parse import file', { error })
+				showError(t('forms', 'Invalid import file'))
+				return
+			}
+
+			if (!exportData || !exportData.form || !exportData.results) {
+				showError(t('forms', 'Invalid import file'))
+				return
+			}
+
+			try {
+				const response = await axios.post(
+					generateOcsUrl('apps/forms/api/v3/forms/import'),
+					{ export: exportData },
+				)
+				const newForm = OcsResponse2Data(response)
+				this.forms.unshift(newForm)
+				this.$router.push({
+					name: 'edit',
+					params: { hash: newForm.hash },
+				})
+				this.mobileCloseNavigation()
+				showSuccess(t('forms', 'Import successful'))
+			} catch (error) {
+				logger.error('Unable to import form', { error })
+				showError(t('forms', 'Unable to import form'))
+			}
+		},
+
 		/**
 		 * Request to clone a form, store returned form and open it.
 		 *
@@ -546,5 +611,9 @@ export default {
 
 .forms-emptycontent {
 	height: 100%;
+}
+
+.forms-import-input {
+	display: none;
 }
 </style>

@@ -237,6 +237,152 @@ class ApiController extends OCSController {
 	}
 
 	/**
+	 * Import a form (including submissions) from JSON export
+	 *
+	 * @param array<string, mixed> $export
+	 * @return DataResponse<Http::STATUS_CREATED, FormsForm, array{}>
+	 * @throws OCSBadRequestException Invalid export payload
+	 * @throws OCSForbiddenException The user is not allowed to create forms
+	 *
+	 * 201: the imported form
+	 */
+	#[CORS()]
+	#[NoAdminRequired()]
+	#[BruteForceProtection(action: 'form')]
+	#[ApiRoute(verb: 'POST', url: '/api/v3/forms/import')]
+	public function importForm(array $export): DataResponse {
+		if (!$this->configService->canCreateForms()) {
+			$this->logger->debug('This user is not allowed to create Forms.');
+			throw new OCSForbiddenException('This user is not allowed to create Forms.');
+		}
+
+		if (!isset($export['form'], $export['results']) || !is_array($export['form']) || !is_array($export['results'])) {
+			throw new OCSBadRequestException('Invalid export payload');
+		}
+
+		$formData = $export['form'];
+		$resultsData = $export['results'];
+		$questionsData = $formData['questions'] ?? null;
+		$submissionsData = $resultsData['submissions'] ?? [];
+
+		if (!is_array($questionsData) || !is_array($submissionsData)) {
+			throw new OCSBadRequestException('Invalid export payload');
+		}
+
+		$access = $this->sanitizeAccessFromImport($formData['access'] ?? []);
+
+		$form = new Form();
+		$form->setOwnerId($this->currentUser->getUID());
+		$form->setHash($this->formsService->generateFormHash());
+		$form->setTitle((string)($formData['title'] ?? ''));
+		$form->setDescription((string)($formData['description'] ?? ''));
+		$form->setAccess($access);
+		$form->setExpires((int)($formData['expires'] ?? 0));
+		$form->setIsAnonymous((bool)($formData['isAnonymous'] ?? false));
+		$form->setSubmitMultiple((bool)($formData['submitMultiple'] ?? false));
+		$form->setAllowEditSubmissions((bool)($formData['allowEditSubmissions'] ?? false));
+		$form->setShowExpiration((bool)($formData['showExpiration'] ?? false));
+		$form->setSubmissionMessage($formData['submissionMessage'] ?? null);
+		if (array_key_exists('maxSubmissions', $formData)) {
+			$form->setMaxSubmissions($formData['maxSubmissions'] === null ? null : (int)$formData['maxSubmissions']);
+		}
+
+		$this->formMapper->insert($form);
+
+		$questionIdMap = [];
+		foreach ($questionsData as $questionData) {
+			if (!is_array($questionData)) {
+				continue;
+			}
+
+			$question = new Question();
+			$question->setFormId($form->getId());
+			$question->setOrder((int)($questionData['order'] ?? (count($questionIdMap) + 1)));
+			$question->setType((string)($questionData['type'] ?? 'short'));
+			$question->setIsRequired((bool)($questionData['isRequired'] ?? false));
+			$question->setText((string)($questionData['text'] ?? ''));
+			$question->setName((string)($questionData['name'] ?? ''));
+			$question->setDescription((string)($questionData['description'] ?? ''));
+
+			$extraSettings = $questionData['extraSettings'] ?? [];
+			if ($extraSettings instanceof \stdClass) {
+				$extraSettings = (array)$extraSettings;
+			}
+			if (!is_array($extraSettings)) {
+				$extraSettings = [];
+			}
+			$question->setExtraSettings($extraSettings);
+
+			$this->questionMapper->insert($question);
+
+			if (isset($questionData['id'])) {
+				$questionIdMap[(int)$questionData['id']] = $question->getId();
+			}
+
+			$optionsData = $questionData['options'] ?? [];
+			if (!is_array($optionsData)) {
+				$optionsData = [];
+			}
+			foreach ($optionsData as $optionIndex => $optionData) {
+				if (!is_array($optionData)) {
+					continue;
+				}
+				$option = new Option();
+				$option->setQuestionId($question->getId());
+				$option->setText((string)($optionData['text'] ?? ''));
+				$option->setOrder((int)($optionData['order'] ?? ($optionIndex + 1)));
+				if (isset($optionData['optionType'])) {
+					$option->setOptionType((string)$optionData['optionType']);
+				}
+
+				$this->optionMapper->insert($option);
+			}
+		}
+
+		foreach ($submissionsData as $submissionData) {
+			if (!is_array($submissionData)) {
+				continue;
+			}
+
+			$submission = new Submission();
+			$submission->setFormId($form->getId());
+			$submission->setUserId((string)($submissionData['userId'] ?? $this->currentUser->getUID()));
+			$submission->setTimestamp((int)($submissionData['timestamp'] ?? time()));
+
+			$this->submissionMapper->insert($submission);
+
+			$answersData = $submissionData['answers'] ?? [];
+			if (!is_array($answersData)) {
+				$answersData = [];
+			}
+			foreach ($answersData as $answerData) {
+				if (!is_array($answerData)) {
+					continue;
+				}
+
+				$oldQuestionId = $answerData['questionId'] ?? null;
+				if ($oldQuestionId === null || !isset($questionIdMap[(int)$oldQuestionId])) {
+					continue;
+				}
+
+				$answer = new Answer();
+				$answer->setSubmissionId($submission->getId());
+				$answer->setQuestionId($questionIdMap[(int)$oldQuestionId]);
+				if (array_key_exists('fileId', $answerData)) {
+					$answer->setFileId($answerData['fileId'] === null ? null : (int)$answerData['fileId']);
+				}
+				$answer->setText((string)($answerData['text'] ?? ''));
+
+				$this->answerMapper->insert($answer);
+			}
+		}
+
+		$this->formMapper->update($form);
+
+		return new DataResponse($this->formsService->getForm($form), Http::STATUS_CREATED);
+	}
+
+	/**
 	 * Read all information to edit a Form (form, questions, options, except submissions/answers)
 	 *
 	 * @param int $formId Id of the form
@@ -1822,9 +1968,45 @@ class ApiController extends OCSController {
 			if (($showAll && !$this->configService->getAllowShowToAll())
 				|| ($permitAll && !$this->configService->getAllowPermitAll())) {
 				$this->logger->info('Not allowed to update showToAllUsers or permitAllUsers');
-				throw new OCSForbiddenException();
-			}
+			throw new OCSForbiddenException();
 		}
+	}
+
+	/**
+	 * Normalize imported access settings to configured limits
+	 *
+	 * @param mixed $access
+	 * @return array{permitAllUsers: bool, showToAllUsers: bool}
+	 */
+	private function sanitizeAccessFromImport(mixed $access): array {
+		if (!is_array($access)) {
+			return [
+				'permitAllUsers' => false,
+				'showToAllUsers' => false,
+			];
+		}
+
+		$permitAll = (bool)($access['permitAllUsers'] ?? false);
+		$showAll = (bool)($access['showToAllUsers'] ?? false);
+
+		if ($permitAll && !$this->configService->getAllowPermitAll()) {
+			$permitAll = false;
+			$showAll = false;
+		}
+
+		if ($showAll && !$this->configService->getAllowShowToAll()) {
+			$showAll = false;
+		}
+
+		if (!$permitAll) {
+			$showAll = false;
+		}
+
+		return [
+			'permitAllUsers' => $permitAll,
+			'showToAllUsers' => $showAll,
+		];
+	}
 	}
 
 	/**
